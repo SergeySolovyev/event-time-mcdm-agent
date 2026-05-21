@@ -82,8 +82,15 @@ def score_protocol(
     # Cost: lower gas = better (inverted)
     cost_score = 1.0 - normalize(gas_cost_eth, 0.0, max_gas_eth)
 
-    # Stability: small TVL changes = better (penalize large swings in either direction)
-    stability_score = 1.0 - normalize(abs(tvl_delta_pct), 0.0, 0.30)
+    # Stability: penalize TVL outflows only.  TVL growth (positive delta) is
+    # a healthy signal -- more deposits = deeper liquidity, lower rate
+    # volatility for the same position.  TVL outflow is the warning signal:
+    # depositors leaving signals either rate disadvantage or protocol
+    # concern, and the residual liquidity becomes more rate-volatile.  An
+    # asymmetric penalty (max(0, -delta)) captures that intuition while
+    # rewarding inflow with the full stability score of 1.0.
+    outflow_pct = max(0.0, -tvl_delta_pct)
+    stability_score = 1.0 - normalize(outflow_pct, 0.0, 0.30)
 
     total = (
         config.WEIGHT_APY * apy_score

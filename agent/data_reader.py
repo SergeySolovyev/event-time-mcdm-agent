@@ -45,6 +45,18 @@ AAVE_POOL_ABI = [
     }
 ]
 
+# Minimal ERC20 ABI used to fetch aToken (totalSupplied) and
+# variableDebtToken (totalBorrowed) for the Aave utilization formula.
+ERC20_ABI = [
+    {
+        "inputs": [],
+        "name": "totalSupply",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
 COMET_ABI = [
     {
         "inputs": [],
@@ -81,6 +93,7 @@ COMET_ABI = [
 RAY = 10**27
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 SCALE_18 = 10**18
+USDC_DECIMALS = 10**6  # USDC uses 6 decimals; aToken inherits the underlying's decimals.
 
 
 @dataclass
@@ -109,6 +122,11 @@ class DataReader:
             abi=COMET_ABI,
         )
         self._prev_tvl: dict[int, float] = {}
+        # Cache for Aave aToken / variableDebtToken contract instances; their
+        # addresses come from getReserveData on first call and do not change
+        # for the lifetime of the reserve.
+        self._aave_atoken = None              # type: ignore[var-annotated]
+        self._aave_variable_debt = None       # type: ignore[var-annotated]
 
     def read_all(self) -> list[ProtocolData]:
         """Read current data from all supported protocols."""
@@ -117,27 +135,39 @@ class DataReader:
         return [aave, compound]
 
     def _read_aave(self) -> ProtocolData:
-        """Read Aave V3 supply rate and metrics."""
+        """Read Aave V3 supply rate, utilization, and TVL.
+
+        Utilization is the canonical formula totalBorrowed / totalSupplied,
+        sourced directly from the aToken and variableDebtToken total
+        supplies returned by getReserveData. TVL is the aToken total supply
+        in underlying-asset units (USDC, 6 decimals).
+        """
         usdc = Web3.to_checksum_address(config.USDC_ADDRESS)
         reserve_data = self.aave_pool.functions.getReserveData(usdc).call()
 
-        # currentLiquidityRate is in RAY (1e27)
-        liquidity_rate_ray = reserve_data[2]  # currentLiquidityRate
-
-        # Normalize: RAY -> 1e18 annual (Aave rates are already annual)
+        # currentLiquidityRate is in RAY (1e27), already annualized.
+        liquidity_rate_ray = reserve_data[2]
         rate_1e18 = liquidity_rate_ray * SCALE_18 // RAY
-        apy = rate_1e18 / SCALE_18
+        apy = liquidity_rate_ray / RAY  # decimal, e.g. 0.045 = 4.5% APY
 
-        # Estimate utilization from rate ratio
-        borrow_rate_ray = reserve_data[4]  # currentVariableBorrowRate
-        if borrow_rate_ray > 0:
-            utilization = liquidity_rate_ray / borrow_rate_ray
+        # Lazily bind token contracts on first read; addresses are stable.
+        if self._aave_atoken is None or self._aave_variable_debt is None:
+            atoken_addr = Web3.to_checksum_address(reserve_data[8])           # aTokenAddress
+            vdebt_addr = Web3.to_checksum_address(reserve_data[10])           # variableDebtTokenAddress
+            self._aave_atoken = self.w3.eth.contract(address=atoken_addr, abi=ERC20_ABI)
+            self._aave_variable_debt = self.w3.eth.contract(address=vdebt_addr, abi=ERC20_ABI)
+
+        # totalSupplied = aToken.totalSupply; totalBorrowed = variableDebtToken.totalSupply
+        # (stable-rate debt has been disabled across V3 deployments; we omit it.)
+        total_supplied = self._aave_atoken.functions.totalSupply().call()
+        total_borrowed = self._aave_variable_debt.functions.totalSupply().call()
+
+        if total_supplied > 0:
+            utilization = total_borrowed / total_supplied
         else:
             utilization = 0.0
 
-        # For TVL, we'd need the aToken total supply; approximate with 0 for now
-        # In production, query IPoolDataProvider for more accurate data
-        tvl = 0.0
+        tvl = total_supplied / USDC_DECIMALS  # USDC has 6 decimals
 
         return ProtocolData(
             name="Aave V3",

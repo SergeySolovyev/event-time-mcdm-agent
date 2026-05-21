@@ -72,9 +72,26 @@ class TestScoreProtocol:
         assert ps.total_score >= 0.95
 
     def test_worst_protocol_scores_near_zero(self):
-        """Zero APY, max util, max gas, volatile TVL should score ~0.0."""
-        ps = score_protocol(apy=0.0, utilization=1.0, gas_cost_eth=0.01, tvl_delta_pct=0.30)
+        """Zero APY, max util, max gas, severe outflow should score ~0.0."""
+        ps = score_protocol(apy=0.0, utilization=1.0, gas_cost_eth=0.01, tvl_delta_pct=-0.30)
         assert ps.total_score <= 0.05
+
+    def test_inflow_does_not_penalize_stability(self):
+        """Asymmetric stability: TVL growth must NOT reduce stability score.
+
+        A protocol attracting deposits is healthier than one losing them at
+        the same magnitude.  Both should receive full stability of 1.0.
+        """
+        inflow = score_protocol(apy=0.05, utilization=0.5, gas_cost_eth=0.005, tvl_delta_pct=0.20)
+        stable = score_protocol(apy=0.05, utilization=0.5, gas_cost_eth=0.005, tvl_delta_pct=0.0)
+        assert inflow.stability_score == 1.0
+        assert stable.stability_score == 1.0
+        assert inflow.total_score == stable.total_score
+
+    def test_outflow_penalized_proportionally(self):
+        """A 15% outflow should give stability ~= 0.5 (15/30 fractional penalty)."""
+        ps = score_protocol(apy=0.05, utilization=0.5, gas_cost_eth=0.005, tvl_delta_pct=-0.15)
+        assert abs(ps.stability_score - 0.5) < 1e-6
 
     def test_scores_bounded(self):
         """Total score should always be in [0, 1]."""
