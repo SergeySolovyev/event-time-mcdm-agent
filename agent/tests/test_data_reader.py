@@ -60,34 +60,45 @@ def _build_reader(aave_reserve_data, atoken_supply, vdebt_supply,
     w3 = _make_w3()
     reader = DataReader(w3)
 
+    # Locate the underlying per-protocol readers; after the Tier-3
+    # refactor the contract instances live inside each reader, not on
+    # the orchestrator.
+    from protocols import AaveV3Reader, CompoundV3Reader               # noqa: E402
+    aave_r = next(r for r in reader._readers if isinstance(r, AaveV3Reader))
+    comp_r = next(r for r in reader._readers if isinstance(r, CompoundV3Reader))
+
     # Aave Pool — return the synthetic 15-tuple reserve data
     aave_get_reserve = MagicMock()
     aave_get_reserve.return_value = _make_function_mock(aave_reserve_data)
-    reader.aave_pool = MagicMock()
-    reader.aave_pool.functions = MagicMock()
-    reader.aave_pool.functions.getReserveData = aave_get_reserve
+    aave_r.pool = MagicMock()
+    aave_r.pool.functions = MagicMock()
+    aave_r.pool.functions.getReserveData = aave_get_reserve
+    reader.aave_pool = aave_r.pool       # keep the legacy alias in sync
 
-    # The aToken / variableDebtToken contracts are lazily bound on the first
-    # _read_aave() call -- we pre-bind them here to inject controlled supplies.
+    # The aToken / variableDebtToken contracts are lazily bound on the
+    # first read; pre-bind them here to inject controlled supplies.
     atoken = MagicMock()
     atoken.functions = MagicMock()
     atoken.functions.totalSupply = MagicMock(return_value=_make_function_mock(atoken_supply))
+    aave_r._atoken = atoken
     reader._aave_atoken = atoken
 
     vdebt = MagicMock()
     vdebt.functions = MagicMock()
     vdebt.functions.totalSupply = MagicMock(return_value=_make_function_mock(vdebt_supply))
+    aave_r._variable_debt = vdebt
     reader._aave_variable_debt = vdebt
 
     # Compound Comet
-    reader.comet = MagicMock()
-    reader.comet.functions = MagicMock()
-    reader.comet.functions.getUtilization = MagicMock(
+    comp_r.comet = MagicMock()
+    comp_r.comet.functions = MagicMock()
+    comp_r.comet.functions.getUtilization = MagicMock(
         return_value=_make_function_mock(compound_util_1e18))
-    reader.comet.functions.getSupplyRate = MagicMock(
+    comp_r.comet.functions.getSupplyRate = MagicMock(
         return_value=_make_function_mock(compound_per_sec_rate))
-    reader.comet.functions.totalSupply = MagicMock(
+    comp_r.comet.functions.totalSupply = MagicMock(
         return_value=_make_function_mock(compound_total_supply))
+    reader.comet = comp_r.comet
 
     return reader
 
@@ -350,6 +361,58 @@ class TestBlockAge:
         future_ts = int(_t.time()) + 600  # 10 min ahead of our clock
         reader.w3.eth.get_block = MagicMock(return_value={"timestamp": future_ts})
         assert reader.block_age_seconds() == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: N-way registry -- a custom ProtocolReader subclass plugs in.
+# ---------------------------------------------------------------------------
+
+class TestRegistry:
+    """Adding a new protocol = one subclass + one register() call."""
+
+    def test_custom_reader_is_invoked_by_read_all(self):
+        """Register a fake third protocol; read_all should include it."""
+        from protocols import ProtocolData, ProtocolReader               # noqa: E402
+
+        class FakeSparkReader(ProtocolReader):
+            NAME = "Spark (fake)"
+            ADAPTER_INDEX = 2
+            def __init__(self):
+                pass            # bypass Web3 — fake never reads anything
+            def read(self) -> ProtocolData:
+                return ProtocolData(
+                    name=self.NAME, adapter_index=self.ADAPTER_INDEX,
+                    apy=0.07, utilization=0.55, tvl=999.0, raw_rate_1e18=int(0.07 * 10**18),
+                )
+
+        reader = _build_reader(_empty_aave_reserve(5 * RAY // 100, 0),
+                               atoken_supply=100 * USDC_DECIMALS,
+                               vdebt_supply=50 * USDC_DECIMALS,
+                               compound_util_1e18=int(0.4 * 10**18),
+                               compound_per_sec_rate=int(0.05 * 10**18 / SECONDS_PER_YEAR),
+                               compound_total_supply=99 * USDC_DECIMALS)
+        reader.register(FakeSparkReader())
+
+        results = reader.read_all()
+        names = sorted(r.name for r in results)
+        assert names == ["Aave V3", "Compound V3", "Spark (fake)"]
+        spark = next(r for r in results if r.name == "Spark (fake)")
+        assert spark.apy == 0.07
+        assert spark.adapter_index == 2
+
+    def test_register_appends_to_readers_list(self):
+        """The registry exposes its readers as a list, not by identity."""
+        from protocols import ProtocolReader                              # noqa: E402
+
+        class NoopReader(ProtocolReader):
+            NAME = "noop"
+            def __init__(self): pass
+            def read(self): return None  # type: ignore[return-value]
+
+        reader = _build_reader(_empty_aave_reserve(), 0, 0, 0, 0, 0)
+        before = len(reader.readers)
+        reader.register(NoopReader())
+        assert len(reader.readers) == before + 1
 
 
 if __name__ == "__main__":
