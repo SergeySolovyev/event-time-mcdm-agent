@@ -62,15 +62,29 @@ def run_check(w3: Web3, reader: DataReader, dry_run: bool = False) -> bool:
     log.info("=" * 60)
     log.info("Starting agent check cycle")
 
-    # 1. Read on-chain data
-    try:
-        protocols = reader.read_all()
-    except Exception as e:
-        log.error(f"Failed to read on-chain data: {e}")
+    # 0. Stale-data guard.  If the RPC is lagging by more than
+    #    MAX_BLOCK_AGE_SECONDS, the rate / utilization snapshot we are
+    #    about to read is too old to act on; rates may have moved or
+    #    another tx in the same block may have changed state.
+    age = reader.block_age_seconds()
+    if age > config.MAX_BLOCK_AGE_SECONDS:
+        log.warning(
+            f"Latest block is {age:.0f}s old (> {config.MAX_BLOCK_AGE_SECONDS}s "
+            f"threshold) -- skipping cycle to avoid acting on stale state"
+        )
+        return False
+
+    # 1. Read on-chain data.  `read_all` now isolates per-protocol failures
+    #    so an Aave RPC blip does not poison the Compound read.
+    protocols = reader.read_all()
+    if not protocols:
+        log.error("No protocols returned data this cycle; skipping")
         return False
 
     gas_price_wei = reader.get_gas_price()
-    estimated_gas = 200_000  # Conservative estimate for rebalance tx
+    # Conservative ceiling for cost estimation; the real estimate is
+    # taken at tx-build time via .estimate_gas() with this as fallback.
+    estimated_gas = 200_000
     gas_cost_eth = (gas_price_wei * estimated_gas) / 1e18
 
     log.info(f"Gas price: {gas_price_wei / 1e9:.2f} Gwei | Est. rebalance cost: {gas_cost_eth:.6f} ETH")
@@ -134,17 +148,33 @@ def run_check(w3: Web3, reader: DataReader, dry_run: bool = False) -> bool:
         log.info("[DRY RUN] Would rebalance to adapter %d — skipping tx", decision.target_index)
         return False
 
-    # 6. Sign and submit
-    log.info(f"Signing rebalance -> adapter {decision.target_index}")
-    signed = sign_rebalance_params(
-        target_adapter_index=decision.target_index,
-        max_loss_bps=config.MAX_LOSS_BPS,
-        nonce=nonce,
+    # 6. Sign and submit, with a nonce-mismatch retry: between the read of
+    #    `rebalanceNonce` above and the build of this tx, a concurrent
+    #    rebalance (e.g. Chainlink Automation fallback or another keeper)
+    #    may have bumped the contract nonce.  Re-read the nonce and
+    #    re-sign up to NONCE_RETRY_LIMIT times before giving up.
+    sm_contract = w3.eth.contract(
+        address=Web3.to_checksum_address(config.STRATEGY_MANAGER_ADDRESS),
+        abi=config.get_strategy_manager_abi(),
     )
-    log.info(f"Signed by: {signed['signer']} at timestamp {signed['timestamp']}")
+    current_nonce = nonce
 
-    try:
-        tx = vault.functions.rebalance(
+    for attempt in range(1, config.NONCE_RETRY_LIMIT + 1):
+        log.info(
+            f"Signing rebalance -> adapter {decision.target_index} "
+            f"(attempt {attempt}/{config.NONCE_RETRY_LIMIT}, nonce={current_nonce})"
+        )
+        signed = sign_rebalance_params(
+            target_adapter_index=decision.target_index,
+            max_loss_bps=config.MAX_LOSS_BPS,
+            nonce=current_nonce,
+        )
+        log.info(f"Signed by: {signed['signer']} at timestamp {signed['timestamp']}")
+
+        # Real gas estimate (replaces the 500K hardcode that wasted ~2x
+        # the gas headroom).  If estimate_gas reverts or errors, fall back
+        # to GAS_LIMIT_FALLBACK so the tx still has room to land.
+        rebalance_call = vault.functions.rebalance(
             (
                 signed["params"]["targetAdapterIndex"],
                 signed["params"]["maxLossBps"],
@@ -152,29 +182,66 @@ def run_check(w3: Web3, reader: DataReader, dry_run: bool = False) -> bool:
                 signed["params"]["nonce"],
             ),
             bytes.fromhex(signed["signature"]),
-        ).build_transaction({
-            "from": signed["signer"],
-            "nonce": w3.eth.get_transaction_count(signed["signer"]),
-            "gas": 500_000,
-            "maxFeePerGas": gas_price_wei * 2,
-            "maxPriorityFeePerGas": w3.to_wei(1, "gwei"),
-        })
+        )
+        try:
+            gas_estimate = rebalance_call.estimate_gas({"from": signed["signer"]})
+            # 20% headroom for state drift between estimate and inclusion.
+            gas_limit = int(gas_estimate * 1.20)
+            log.info(f"Gas estimate: {gas_estimate} (+20% buffer -> limit {gas_limit})")
+        except Exception as e:                                        # noqa: BLE001
+            log.warning(f"estimate_gas failed ({e!s}); using fallback {config.GAS_LIMIT_FALLBACK}")
+            gas_limit = config.GAS_LIMIT_FALLBACK
 
-        signed_tx = w3.eth.account.sign_transaction(tx, config.PRIVATE_KEY)
-        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        log.info(f"Rebalance tx submitted: {tx_hash.hex()}")
+        try:
+            tx = rebalance_call.build_transaction({
+                "from": signed["signer"],
+                "nonce": w3.eth.get_transaction_count(signed["signer"]),
+                "gas": gas_limit,
+                "maxFeePerGas": gas_price_wei * 2,
+                "maxPriorityFeePerGas": w3.to_wei(1, "gwei"),
+            })
+            signed_tx = w3.eth.account.sign_transaction(tx, config.PRIVATE_KEY)
+            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            log.info(f"Rebalance tx submitted: {tx_hash.hex()}")
 
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        if receipt["status"] == 1:
-            log.info(f"Rebalance confirmed in block {receipt['blockNumber']}")
-        else:
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            if receipt["status"] == 1:
+                log.info(f"Rebalance confirmed in block {receipt['blockNumber']}")
+                return True
+            # Status 0 = revert.  Most likely cause is a nonce that was
+            # consumed between sign and send; re-read and retry.
             log.error(f"Rebalance tx REVERTED in block {receipt['blockNumber']}")
+            new_nonce = sm_contract.functions.rebalanceNonce().call()
+            if new_nonce != current_nonce:
+                log.warning(
+                    f"On-chain nonce changed {current_nonce} -> {new_nonce}; "
+                    f"resigning and retrying"
+                )
+                current_nonce = new_nonce
+                continue
+            return False
 
-        return receipt["status"] == 1
+        except Exception as e:                                        # noqa: BLE001
+            err_text = str(e)
+            # web3.py raises ContractLogicError / ValueError on nonce mismatch;
+            # detect by string match and retry.  Anything else is logged and
+            # bubbles up to the outer loop.
+            if "nonce" in err_text.lower():
+                new_nonce = sm_contract.functions.rebalanceNonce().call()
+                log.warning(
+                    f"Tx build/send failed on nonce ({err_text!s}); "
+                    f"chain nonce now {new_nonce}; retrying"
+                )
+                current_nonce = new_nonce
+                continue
+            log.error(f"Failed to submit rebalance tx: {e}")
+            return False
 
-    except Exception as e:
-        log.error(f"Failed to submit rebalance tx: {e}")
-        return False
+    log.error(
+        f"Gave up after {config.NONCE_RETRY_LIMIT} nonce-retry attempts; "
+        f"will try again next cycle"
+    )
+    return False
 
 
 # Entry Point

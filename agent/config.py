@@ -36,6 +36,21 @@ SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.05"))      # Min score d
 MAX_LOSS_BPS = int(os.getenv("MAX_LOSS_BPS", "50"))                # 0.5% max slippage
 EMA_ALPHA = float(os.getenv("EMA_ALPHA", "0.3"))                   # 30% weight on new data
 
+# Robustness guards (Tier 2).
+# If the latest block's timestamp is older than this many seconds vs the
+# system clock, skip the cycle: the RPC is lagging and any decision based
+# on stale state would risk acting on rates that have already moved.
+MAX_BLOCK_AGE_SECONDS = int(os.getenv("MAX_BLOCK_AGE_SECONDS", "180"))
+
+# When `vault.rebalance.estimate_gas` fails (e.g. simulation revert or RPC
+# error), fall back to this conservative ceiling so the tx still has room
+# to land.  Real estimates typically come in at ~150-250k.
+GAS_LIMIT_FALLBACK = int(os.getenv("GAS_LIMIT_FALLBACK", "500000"))
+
+# Maximum number of nonce-resync retries before we abandon the rebalance
+# this cycle (and try again on the next check).
+NONCE_RETRY_LIMIT = int(os.getenv("NONCE_RETRY_LIMIT", "3"))
+
 # Scoring Weights
 
 WEIGHT_APY = float(os.getenv("WEIGHT_APY", "0.40"))

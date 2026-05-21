@@ -274,5 +274,83 @@ class TestTvlDelta:
         assert abs(delta + 0.20) < 1e-9
 
 
+# ---------------------------------------------------------------------------
+# Tier 2: robustness paths (per-protocol isolation, stale-block detection).
+# ---------------------------------------------------------------------------
+
+class TestReadAllIsolation:
+    """If one protocol's read raises, the other still returns successfully."""
+
+    def test_aave_failure_does_not_kill_compound(self):
+        reader = _build_reader(_empty_aave_reserve(0, 0),
+                               atoken_supply=100 * USDC_DECIMALS,
+                               vdebt_supply=0,
+                               compound_util_1e18=int(0.4 * 10**18),
+                               compound_per_sec_rate=int(0.05 * 10**18 / SECONDS_PER_YEAR),
+                               compound_total_supply=99 * USDC_DECIMALS)
+        # Sabotage the Aave path: aToken.totalSupply now raises
+        reader._aave_atoken.functions.totalSupply.return_value.call.side_effect = (
+            RuntimeError("RPC timeout"))
+
+        results = reader.read_all()
+        assert len(results) == 1
+        assert results[0].name == "Compound V3"
+
+    def test_compound_failure_does_not_kill_aave(self):
+        reader = _build_reader(_empty_aave_reserve(5 * RAY // 100, 0),
+                               atoken_supply=100 * USDC_DECIMALS,
+                               vdebt_supply=50 * USDC_DECIMALS,
+                               compound_util_1e18=0,
+                               compound_per_sec_rate=0,
+                               compound_total_supply=0)
+        reader.comet.functions.getUtilization.return_value.call.side_effect = (
+            ConnectionError("provider offline"))
+
+        results = reader.read_all()
+        assert len(results) == 1
+        assert results[0].name == "Aave V3"
+
+    def test_both_failing_returns_empty_list(self):
+        reader = _build_reader(_empty_aave_reserve(0, 0), 0, 0, 0, 0, 0)
+        reader._aave_atoken.functions.totalSupply.return_value.call.side_effect = (
+            RuntimeError("RPC timeout"))
+        reader.comet.functions.getUtilization.return_value.call.side_effect = (
+            RuntimeError("RPC timeout"))
+
+        assert reader.read_all() == []
+
+
+class TestBlockAge:
+    """Stale-data detector returns a non-negative second count."""
+
+    def test_block_age_returns_zero_when_block_is_current(self):
+        import time as _t
+        reader = _build_reader(_empty_aave_reserve(), 0, 0, 0, 0, 0)
+        # A block whose timestamp is "now" should yield ~0 age (allow small drift).
+        reader.w3.eth.get_block = MagicMock(return_value={"timestamp": int(_t.time())})
+        age = reader.block_age_seconds()
+        assert 0.0 <= age < 5.0
+
+    def test_block_age_positive_when_block_is_old(self):
+        reader = _build_reader(_empty_aave_reserve(), 0, 0, 0, 0, 0)
+        reader.w3.eth.get_block = MagicMock(return_value={"timestamp": 1_700_000_000})
+        age = reader.block_age_seconds()
+        assert age > 0
+
+    def test_block_age_inf_when_rpc_dead(self):
+        """If the RPC call itself throws, treat the chain as infinitely stale."""
+        reader = _build_reader(_empty_aave_reserve(), 0, 0, 0, 0, 0)
+        reader.w3.eth.get_block = MagicMock(side_effect=ConnectionError("rpc"))
+        assert reader.block_age_seconds() == float("inf")
+
+    def test_block_age_zero_under_clock_skew(self):
+        """Future-block timestamp (NTP drift) is clamped to 0, not negative."""
+        import time as _t
+        reader = _build_reader(_empty_aave_reserve(), 0, 0, 0, 0, 0)
+        future_ts = int(_t.time()) + 600  # 10 min ahead of our clock
+        reader.w3.eth.get_block = MagicMock(return_value={"timestamp": future_ts})
+        assert reader.block_age_seconds() == 0.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

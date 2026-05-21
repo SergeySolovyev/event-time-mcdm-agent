@@ -129,10 +129,25 @@ class DataReader:
         self._aave_variable_debt = None       # type: ignore[var-annotated]
 
     def read_all(self) -> list[ProtocolData]:
-        """Read current data from all supported protocols."""
-        aave = self._read_aave()
-        compound = self._read_compound()
-        return [aave, compound]
+        """Read current data from all supported protocols.
+
+        Each protocol is read in isolation: a failure (RPC timeout,
+        revert, malformed return) on one protocol skips THAT protocol
+        only, rather than aborting the entire scoring cycle.  The
+        caller is responsible for tolerating a degraded list -- the
+        scoring engine simply evaluates whichever protocols returned.
+        """
+        import logging
+        log = logging.getLogger("ai-vault-agent.reader")
+
+        results: list[ProtocolData] = []
+        for name, fn in (("Aave V3", self._read_aave),
+                         ("Compound V3", self._read_compound)):
+            try:
+                results.append(fn())
+            except Exception as exc:                                  # noqa: BLE001
+                log.error(f"read_all: {name} failed -- skipping this cycle: {exc}")
+        return results
 
     def _read_aave(self) -> ProtocolData:
         """Read Aave V3 supply rate, utilization, and TVL.
@@ -218,3 +233,21 @@ class DataReader:
     def get_gas_price(self) -> int:
         """Get current gas price in wei."""
         return self.w3.eth.gas_price
+
+    def block_age_seconds(self) -> float:
+        """Wall-clock age of the latest block.
+
+        Used as a stale-data guard: if the RPC is lagging by minutes,
+        the scoring cycle should skip rather than act on stale on-chain
+        state.  Returns a non-negative float; clock skew that puts the
+        block in the future is clamped to zero.
+        """
+        import time as _t
+        try:
+            latest = self.w3.eth.get_block("latest")
+        except Exception:
+            # If we cannot even reach the RPC, treat as infinitely stale
+            # so the caller skips this cycle.
+            return float("inf")
+        block_ts = latest["timestamp"]
+        return max(0.0, _t.time() - block_ts)
