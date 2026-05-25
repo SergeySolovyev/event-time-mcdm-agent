@@ -259,7 +259,9 @@ class PerBlockLoop:
             )
 
         # 6. Persist for backtest replay / live audit.
-        self.history.append(state, action)
+        # T6 HistoryStore.append is async (asyncio.to_thread for the disk
+        # write); legacy MagicMock-using tests are updated to AsyncMock.
+        await self.history.append(state, action)
 
         return action
 

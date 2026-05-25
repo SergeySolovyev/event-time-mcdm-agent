@@ -76,7 +76,9 @@ def _make_loop(
     mempool.submit_private_tx = AsyncMock(return_value={"status": 1})
 
     history = MagicMock()
-    history.append = MagicMock()
+    # T6 HistoryStore.append is async (asyncio.to_thread inside); AsyncMock
+    # returns an awaitable so the loop's `await history.append(...)` resolves.
+    history.append = AsyncMock()
 
     loop = PerBlockLoop(
         w3=_make_w3(),
