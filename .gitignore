@@ -17,6 +17,12 @@ __pycache__/
 agent/.venv/
 agent/agent.log
 
+# Plan E T1: agent/decision is a Windows junction (POSIX symlink in CI) to
+# predictive-mcdm-defi/decision -- created out-of-band by `mklink /J`.
+# git's Windows-port mishandles junctions; gitignoring keeps the zero-drift
+# guarantee intact on fresh clones. Recovery: see agent/RUNBOOK.md.
+agent/decision/
+
 # LaTeX build artifacts
 docs/*.aux
 docs/*.log
