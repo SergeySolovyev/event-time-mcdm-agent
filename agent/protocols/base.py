@@ -74,3 +74,21 @@ class ProtocolReader(ABC):
     def read(self) -> ProtocolData:
         """Return a fresh ProtocolData snapshot for this protocol."""
         raise NotImplementedError
+
+    async def read_at_block(self, block_number: int) -> ProtocolData:
+        """Return a ProtocolData snapshot pinned to ``block_number``.
+
+        This is an OPTIONAL async slot added for Plan E (per-block event-time
+        backtesting and the Spark / Morpho / Fluid / Euler family of readers).
+        Legacy readers (Aave V3, Compound V3) only implement the sync ``read()``
+        path and inherit this default, which raises ``NotImplementedError``.
+
+        New readers SHOULD implement this method against a specific block
+        (``block_identifier=block_number`` on every ``.call(...)``) and may
+        delegate the legacy sync ``read()`` to it via
+        ``asyncio.run(self.read_at_block(self.w3.eth.block_number))``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement read_at_block; "
+            "this reader is sync-only via read()."
+        )
