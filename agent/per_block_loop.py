@@ -235,8 +235,14 @@ class PerBlockLoop:
             gas_used_estimate=self.gas_used_estimate,
         )
 
-        # 4. Ask the policy.
+        # 4. Ask the policy (timed for Prometheus latency summary).
+        import time as _time
+        from observability import METRICS, record_decision
+        _t0 = _time.perf_counter()
         action = self.policy.decide(state)
+        METRICS.observe("agent_decision_latency_seconds",
+                        value=_time.perf_counter() - _t0)
+        METRICS.inc("agent_blocks_processed_total")
 
         # 5. Execute.
         if action.kind == "switch":
@@ -257,6 +263,22 @@ class PerBlockLoop:
                 self.current_protocol,
                 action.rationale,
             )
+
+        # 5b. Tier 5 observability sink: JSON log + Prometheus + audit trail.
+        gas_cost_usd = (state.gas_used_estimate * state.gas_price_gwei * 1e-9
+                        * state.eth_price_usd)
+        record_decision(
+            block_number=state.block_number,
+            block_timestamp=state.block_timestamp.isoformat(),
+            action_kind=action.kind,
+            target_protocol=action.target_protocol,
+            rationale=action.rationale,
+            current_protocol=self.current_protocol,
+            position_usd=state.position_usd,
+            gas_price_gwei=state.gas_price_gwei,
+            gas_cost_usd=gas_cost_usd,
+            panel_snapshot={p: state.lending_apr[p] for p in state.protocols},
+        )
 
         # 6. Persist for backtest replay / live audit.
         # T6 HistoryStore.append is async (asyncio.to_thread for the disk
