@@ -23,6 +23,15 @@ agent/agent.log
 # guarantee intact on fresh clones. Recovery: see agent/RUNBOOK.md.
 agent/decision/
 
+# Runtime state (per-day audit trails, rolling history); not source.
+agent/state/audit/
+agent/state/history.parquet
+
+# V1 deprecated forecaster model (DA-BiGRU-CNN, ONNX). V2 event-time
+# pipeline does not consume this. If needed, fetch from the paper repo
+# release artefacts rather than the agent repo.
+agent/models/
+
 # LaTeX build artifacts
 docs/*.aux
 docs/*.log

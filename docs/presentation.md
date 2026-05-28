@@ -6,405 +6,133 @@ math: mathjax
 style: |
   section {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    font-size: 22px;
+    font-size: 24px;
   }
-  h1 { font-size: 36px; color: #1a1a2e; }
-  h2 { font-size: 28px; color: #16213e; }
+  h1 { font-size: 38px; color: #1a1a2e; }
+  h2 { font-size: 30px; color: #16213e; }
+  h3 { font-size: 24px; color: #0f3460; }
   table { font-size: 18px; }
   code { font-size: 16px; }
-  .columns { display: flex; gap: 40px; }
-  .col { flex: 1; }
 ---
 
 <!-- _class: lead -->
 
-# AI-Managed ERC-4626 Yield Vault
-## Multi-Criteria Decision Making for Automated DeFi Yield Optimization
+# ERC-4626 Yield Vault with MCDM Scoring
 
-**[Your Name]**
-[University], Department of [CS / Finance]
-April 2026
+**Sergei Solovev**
+sesesolovev@edu.hse.ru
+HSE University, April 2026
 
----
-
-# Agenda
-
-1. Problem: DeFi Yield Volatility
-2. Existing Solutions & Their Limitations
-3. Our Architecture: Hybrid Agent + On-Chain
-4. Mathematical Foundations
-5. Multi-Criteria Decision Making (MCDM)
-6. Security Model
-7. Testing & Formal Verification
-8. Demo: OpenClaw Chat Interface
-9. Results & Comparison
-10. Future Work
+Project 1: Custom DeFi Protocol
 
 ---
 
-# 1. The Problem
+# Why This Project?
 
-**DeFi lending rates are volatile and cross over frequently**
+### The problem with DeFi yields
+
+Lending protocols like Aave and Compound offer variable interest rates that change every block. Users who want the best yield face three challenges:
+
+- **Monitoring** -- rates shift every ~12 seconds, impossible to track manually
+- **Gas costs** -- each rebalance costs $2-50, eating into profits
+- **Risk** -- chasing the highest APY ignores utilization risk and rate stability
+
+### The idea: an autonomous agent
+
+What if a **software agent** could watch the rates, evaluate multiple risk factors, and move funds automatically -- while proving every decision cryptographically on-chain?
+
+This is **agentic DeFi**: an off-chain agent that thinks, and an on-chain vault that verifies and executes.
+
+---
+
+# How It Works
+
+**User deposits USDC into the vault and receives `aiUSDC` shares.**
+**From that point, the agent manages everything automatically.**
 
 ```
-APY (%)
-  8 |        /\        Compound
-    |       /  \      /
-  6 |------/----\----/---- Optimal = follow the leader
-    |     /      \  /
-  4 |----/--------\/-----  But: gas costs, timing, risk...
-    |   /    Aave  \
-  2 |--/------------\----
-    +-------------------- Time
++-------------------------------------------------------+
+|  Off-chain: Python Agent (runs every hour)             |
+|  1. Read APY, utilization, TVL, gas price              |
+|  2. Smooth rates with EMA (anti-manipulation)          |
+|  3. Score protocols with MCDM (4 factors)              |
+|  4. Sign decision with EIP-712 typed data              |
++----------------------------+--------------------------+
+                             | signed tx
++----------------------------+--------------------------+
+|  On-chain: AIVault.sol (ERC-4626 + UUPS proxy)        |
+|  - Verify keeper signature (ECDSA)                     |
+|  - Check nonce, timestamp, cooldown                    |
+|  - Execute rebalance via adapter                       |
+|  +-- AaveV3Adapter    +-- CompoundV3Adapter            |
++-------------------------------------------------------+
+  Fallback: Chainlink Automation (if agent offline > 6h)
 ```
 
-**Why manual optimization fails:**
-- Rates change every ~12 seconds
-- Each rebalance costs $2–50 in gas
-- APY alone is not enough — utilization, stability, cost all matter
-- Timing mistakes destroy value (temporary spikes)
+**Key insight:** The agent can be complex (multi-factor analysis), but the vault only trusts cryptographic proofs -- not the agent itself.
 
 ---
 
-# 2. Existing Solutions
+# Key Formulas
 
-| Protocol | Decision Logic | Verifiable? | Multi-Factor? |
-|----------|---------------|-------------|---------------|
-| **Yearn V3** | Strategist-coded, on-chain | Yes | No |
-| **Beefy** | Harvest -> compound loop | Yes | No |
-| **Idle Finance** | Best-APY-wins threshold | Yes | No |
-| **Almanak** | ML models (closed source) | **No** | Yes |
-
-**The gap:** No system combines rich off-chain analysis with on-chain verifiability.
-
-### Our position:
-> **Off-chain intelligence + On-chain verification = Best of both worlds**
-
----
-
-# 3. Architecture Overview
-
-```
-+--------------------------+
-|   OpenClaw Chat Interface |  "What's the APY?"
-+------------+-------------+
-             | REST API
-+------------+-------------+
-|   Python AI Agent         |  Off-chain
-|   - Read on-chain data    |
-|   - EMA rate smoothing    |
-|   - MCDM scoring (4 factors) |
-|   - EIP-712 sign decision |
-+------------+-------------+
-             | Signed tx
-+------------+-------------+
-|   AIVault.sol (ERC-4626)  |  On-chain
-|   - Verify ECDSA signature|
-|   - Execute rebalance     |
-|   - Post-check slippage   |
-|   +-- AaveV3Adapter       |
-|   \-- CompoundV3Adapter   |
-+--------------------------+
-  Fallback: Chainlink Automation (if agent offline >6h)
-```
-
----
-
-# 4. Smart Contract Design
-
-**ERC-4626 Tokenized Vault** — users deposit USDC, receive `aiUSDC` shares
-
-**Share pricing:**
+**ERC-4626 share price** (with inflation attack protection):
 $$s = \left\lfloor \frac{a \cdot (S + 10^6)}{A + 1} \right\rfloor$$
 
-The $10^6$ offset creates **virtual shares** preventing the inflation attack.
+**APY normalization** (cross-protocol, to annual 1e18 scale):
+- Aave V3: $\text{APY} = \text{liquidityRate}_{RAY} / 10^9$
+- Compound V3: $\text{APY} = r_{sec} \times 31{,}557{,}600$
 
-**Key contracts:**
+**EMA smoothing** (dampens noise): $S_t = 0.3 \cdot R_t + 0.7 \cdot S_{t-1}$
 
-| Contract | Lines | Role |
-|----------|-------|------|
-| `AIVault.sol` | 571 | Core vault, ERC-4626, rebalance |
-| `StrategyManager.sol` | 208 | Decision validation, EMA |
-| `AaveV3Adapter.sol` | 102 | Aave V3 wrapper |
-| `CompoundV3Adapter.sol` | 73 | Compound V3 wrapper |
-| `RateMath.sol` | 60 | Rate normalization |
+**MCDM scoring model:**
 
----
+$$\text{Score}_i = 0.40 \cdot f_{APY} + 0.25 \cdot f_{Risk} + 0.20 \cdot f_{Cost} + 0.15 \cdot f_{Stability}$$
 
-# 5. APY Normalization
+Rebalance if: $\text{Score}_{best} - \text{Score}_{current} \geq 0.05$
 
-Protocols use incompatible rate formats. We normalize to **annual 1e18**:
-
-**Aave V3** (RAY = $10^{27}$, already annual):
-$$\text{APY}_{1e18} = \frac{\text{liquidityRate}_{\text{RAY}}}{10^9}$$
-
-**Compound V3** (per-second rate):
-$$\text{APY}_{1e18} = r_{\text{sec}} \times 31{,}557{,}600$$
-
-**EMA Smoothing** (dampens noise and manipulation):
-$$S_t = 0.3 \cdot R_t + 0.7 \cdot S_{t-1}$$
-
-Rate jump guard: skip update if $|R_t - S_{t-1}| > 5\%$
+**Example:** Aave offers 6% APY but has 95% utilization (risky). Compound offers 5% but with 30% utilization (safe). Simple APY comparison picks Aave. Our MCDM model picks Compound -- the safer choice.
 
 ---
 
-# 6. MCDM Scoring Model
+# Security and Testing
 
-$$\text{Score}_i = 0.40 \cdot f_{\text{APY}} + 0.25 \cdot f_{\text{Risk}} + 0.20 \cdot f_{\text{Cost}} + 0.15 \cdot f_{\text{Stability}}$$
+**7 threat mitigations:**
 
-| Factor | Formula | Why |
-|--------|---------|-----|
-| **APY** (40%) | $\text{APY} / 0.20$ | Primary yield signal |
-| **Risk** (25%) | $1 - \text{utilization}$ | High util -> rate drop risk |
-| **Cost** (20%) | $1 - \text{gasCost} / 0.01$ | Gas efficiency |
-| **Stability** (15%) | $1 - |\Delta\text{TVL}| / 0.30$ | TVL stability |
+| Threat | Protection |
+|--------|-----------|
+| Inflation attack | Virtual shares ($10^6$ offset) |
+| Reentrancy | ReentrancyGuard on all external functions |
+| Rate manipulation | EMA + 5% jump guard |
+| Signature forgery | EIP-712 domain + ECDSA verification |
+| Replay attack | Sequential nonce + 5-min timestamp TTL |
+| Agent downtime | Chainlink Automation fallback (6h) |
+| Rapid exploitation | 1-hour cooldown between rebalances |
 
-**Decision rule:** Rebalance if $\text{Score}_{\text{best}} - \text{Score}_{\text{current}} \geq 0.05$
+**67 tests, 0 failures:**
 
----
-
-# 7. Worked Example: Risk Beats APY
-
-| | Aave V3 | Compound V3 |
-|---|---------|-------------|
-| APY | **6.0%** | 5.2% |
-| Utilization | 85% (risky) | **45% (safe)** |
-| Gas | 0.003 ETH | 0.003 ETH |
-| TVL Δ | -2% | +1% |
-
-**Scoring:**
-
-| Factor | Aave | Compound |
-|--------|------|----------|
-| APY (×0.40) | 0.120 | 0.104 |
-| Risk (×0.25) | 0.038 | **0.138** |
-| Cost (×0.20) | 0.140 | 0.140 |
-| Stability (×0.15) | 0.140 | **0.145** |
-| **Total** | **0.438** | **0.527** |
-
-> **Result: Compound wins despite lower APY. Risk-awareness outperforms APY-chasing.**
+| Category | Tests | Method |
+|----------|-------|--------|
+| Unit (Solidity) | 37 | Concrete + fuzz (1000 runs each) |
+| Integration | 4 | Full lifecycle (deposit -> rebalance -> yield -> withdraw) |
+| Invariant | 6 | Stateful fuzzing: 76,800+ random calls, 0 violations |
+| Python scoring | 20 | Pytest unit tests |
 
 ---
 
-# 8. EIP-712 Signature Verification
+# Deployment
 
-**Agent signs structured data, vault verifies on-chain:**
+**Ethereum Sepolia** (Chain ID: 11155111). All contracts verified on Sourcify.
 
-```
-Agent (off-chain):
-  1. Build RebalanceParams{target, maxLoss, timestamp, nonce}
-  2. Hash with EIP-712 domain (name, version, chainId, contract)
-  3. Sign with keeper private key -> (v, r, s)
+| Contract | Address |
+|----------|---------|
+| AaveV3Adapter | `0x8545D79f6FaB51EDc93Cf024fBD1FfAc98504ba1` |
+| CompoundV3Adapter | `0xEB0D41F07691765314B9A45645Ee995d879c7ac7` |
+| StrategyManager | `0x353469534dA4FB64d52Ae5059CEFd098557eBFa9` |
+| AIVault (proxy) | `0x1324238b6F56Ccc785fC7f79Ca693546236Ad02C` |
 
-Vault (on-chain):
-  1. Reconstruct digest from params
-  2. ecrecover(digest, v, r, s) -> signer
-  3. Verify: signer == keeper [x]
-  4. Check: nonce, timestamp freshness, cooldown
-  5. Execute rebalance
-```
+**Tech stack:** Solidity 0.8.24, Python 3.12, Foundry, OpenZeppelin, Chainlink, Docker
 
-**Protection layers:** nonce (replay), 5-min max age (stale), domain binding (cross-chain)
-
----
-
-# 9. Security Model
-
-| Threat | Mitigation |
-|--------|------------|
-| **Inflation attack** | Virtual shares ($10^6$ offset) |
-| **Reentrancy** | ReentrancyGuard on all externals |
-| **Rate manipulation** | EMA + 5% jump guard |
-| **Signature forgery** | EIP-712 + ECDSA verification |
-| **Replay attack** | Sequential nonce + timestamp |
-| **Agent downtime** | Chainlink Automation fallback (6h) |
-| **Rapid exploitation** | 1-hour cooldown between rebalances |
-| **Max loss** | Post-rebalance slippage check |
-
----
-
-# 10. Testing & Formal Verification
-
-## 67 tests, 81,800+ randomized calls, 0 failures
-
-| Category | Tests | Technique |
-|----------|-------|-----------|
-| RateMath unit | 20 | Concrete + fuzz (×1000) |
-| AIVault unit | 17 | Concrete + fuzz (×1000) |
-| Integration | 4 | Full lifecycle E2E |
-| **Invariant** | **6** | **Stateful fuzzing: 76,800 calls** |
-| Python scoring | 20 | Pytest |
-
-### Invariants proven (zero violations):
-- [x] Vault always solvent
-- [x] Accounting: deposits - withdrawals = assets
-- [x] Share conversions round-trip consistent
-- [x] Share price non-decreasing
-
----
-
-# 11. Invariant Testing: Why It Matters
-
-**Unit tests**: "Does function X work with input Y?" -> specific scenarios
-
-**Invariant tests**: "Does property P hold under ANY sequence of calls?" -> universal proof
-
-```
-Foundry fuzzer generates random sequences:
-  deposit(actor=3, amount=47291) -> OK
-  withdraw(actor=1, amount=8831) -> OK  
-  redeem(actor=4, amount=12003) -> OK
-  deposit(actor=0, amount=99102) -> OK
-  ...
-  After each sequence: check all 6 invariants [x]
-
-  256 sequences × 50 calls = 12,800 calls per invariant
-  6 invariants × 12,800 = 76,800 total calls
-  0 violations
-```
-
----
-
-# 12. OpenClaw: Natural Language DeFi Interface
-
-```
-User:  "What's the current APY on Aave?"
-Bot:   "Aave V3: 4.82% (smoothed: 4.65%) | Utilization: 78.3%
-        Compound V3: 3.15% (smoothed: 3.20%) | Utilization: 45.1%"
-
-User:  "Should we rebalance?"
-Bot:   "Score: Aave 0.62, Compound 0.58
-        Delta: 0.04 < threshold 0.05
-        Recommendation: HOLD — Aave still leads."
-
-User:  "Show vault status"
-Bot:   "TVL: 50,000 USDC | Active: Aave V3 | Share price: 1.0071
-        Last rebalance: 3h ago | Agent: ONLINE [x]"
-```
-
-**Architecture:** Python FastAPI (port 8042) <- OpenClaw skill -> Telegram/Discord
-
----
-
-# 13. Architecture — Three Layers
-
-```
-+---------------------------------------------------+
-|             INTERFACE LAYER                        |
-|  OpenClaw + REST API (FastAPI, port 8042)          |
-|  Natural language <-> structured vault queries     |
-+---------------------------------------------------+
-|             INTELLIGENCE LAYER                     |
-|  Python Agent: MCDM scoring + EIP-712 signing      |
-|  Every hour: read -> smooth -> score -> decide -> act  |
-+---------------------------------------------------+
-|             EXECUTION LAYER (On-Chain)             |
-|  AIVault.sol -> StrategyManager -> Adapters        |
-|  Verify signature -> Execute -> Slippage check     |
-|  Fallback: Chainlink Automation (after 6h)         |
-+---------------------------------------------------+
-```
-
----
-
-# 14. Adapter Pattern — Extensibility
-
-```solidity
-interface IProtocolAdapter {
-    function supply(address asset, uint256 amount) external;
-    function withdraw(address asset, uint256 amount) external returns (uint256);
-    function balance(address asset) external view returns (uint256);
-    function getSupplyRate(address asset) external view returns (uint256);
-    function getUtilization(address asset) external view returns (uint256);
-}
-```
-
-**Adding a new protocol** (Morpho, Euler, Spark):
-1. Implement `IProtocolAdapter` (~70 lines)
-2. Register with StrategyManager
-3. **Zero changes** to vault or scoring engine
-
----
-
-# 15. Comparison with Existing Systems
-
-| Feature | Yearn | Beefy | Idle | Almanak | **Ours** |
-|---------|-------|-------|------|---------|----------|
-| Multi-factor scoring | No | No | No | Yes (closed) | **Yes (open)** |
-| Decision verifiability | Yes | Yes | Yes | No | **Yes (EIP-712)** |
-| Off-chain intelligence | No | No | No | Yes | **Yes** |
-| Fallback mechanism | -- | -- | -- | No | **Yes (Chainlink)** |
-| Invariant-tested | Varies | No | No | ? | **Yes (76K calls)** |
-| Chat interface | No | No | No | No | **Yes (OpenClaw)** |
-| Upgradeable | Some | No | Some | -- | **Yes (UUPS)** |
-| Open source | Yes | Yes | Yes | No | **Yes** |
-
----
-
-# 16. Project Statistics
-
-| Metric | Value |
-|--------|-------|
-| Solidity contracts | 6 contracts + 2 libraries |
-| Python modules | 5 (agent) + 1 (API) |
-| Total lines of code | ~2,500 |
-| Tests (total) | 67 |
-| Fuzz/invariant calls | 81,800+ |
-| Invariant violations | **0** |
-| Supported protocols | 2 (extensible to N) |
-| Testnet | Ethereum Sepolia |
-| Proxy pattern | UUPS (ERC-1967) |
-| Token standard | ERC-4626 |
-
----
-
-# 17. Key Design Decisions
-
-### 1. Hybrid Architecture
-Off-chain scoring power + on-chain trust guarantees
-
-### 2. MCDM Scoring
-4-factor weighted model beats single-factor APY comparison
-
-### 3. Verifiable Decisions
-Every rebalance has an EIP-712 signed proof on-chain
-
-### 4. Formal Safety
-76,800+ invariant calls prove solvency, accounting, price stability
-
-### 5. Graceful Degradation
-Chainlink fallback ensures the vault is never unmanaged
-
-### 6. Conversational DeFi
-First yield vault with a natural language interface (OpenClaw)
-
----
-
-# 18. Future Work
-
-| Priority | Enhancement | Impact |
-|----------|-------------|--------|
-| High | ML rate prediction (LSTM/XGBoost) | Better timing |
-| High | Multi-chain (Arbitrum, Base) | Broader market |
-| Medium | More adapters (Morpho, Spark, Euler) | More opportunities |
-| Medium | Formal verification (Certora) | Stronger proofs |
-| Low | DAO governance | Decentralization |
-| Low | Risk scoring oracle | Composability |
-
----
-
-<!-- _class: lead -->
-
-# 19. Conclusion
-
-## AI Yield Vault demonstrates that
-## **agentic DeFi** — off-chain intelligence
-## with on-chain verification —
-## is a viable paradigm
-## for automated yield optimization.
-
-**67 tests | 76,800+ invariant calls | 0 violations**
-**4-factor MCDM | EIP-712 signed | Chainlink fallback | OpenClaw chat**
+**Design patterns used:** ERC-4626 (tokenized vault), UUPS proxy (ERC-1967), Adapter/Strategy pattern, EIP-712 typed signing
 
 ---
 
@@ -414,6 +142,5 @@ First yield vault with a natural language interface (OpenClaw)
 
 **Questions?**
 
-Code: `github.com/[your-repo]`
-Testnet: Ethereum Sepolia
-Stack: Solidity 0.8.24 + Python 3.12 + Foundry + Docker + OpenClaw
+GitHub: `github.com/SergeySolovyev/ai-yield-vault`
+Contact: sesesolovev@edu.hse.ru | @Sergey_Solovjov | www.sergeisolovev.com
