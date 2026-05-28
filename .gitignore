@@ -57,3 +57,5 @@ Thumbs.db
 
 # Misc build
 foundry.lock
+
+wandb/
